@@ -1,0 +1,71 @@
+version: 2.1
+orbs:
+  slack: circleci/slack@4.9.3
+jobs:
+  build:
+    docker:
+      - image: circleci/python:3.8
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build Docker Image
+          command: docker build -t devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM} .
+      - run:
+          name: Run Docker Image
+          command: docker run --rm -d -p 5000:5000 --name goofy devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM}
+      - run:
+          name: Test Docker container
+          command: |
+            container_ip=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' goofy)
+            echo "Container IP: $container_ip"
+            if curl -f http://$container_ip:5000; then
+              echo "Test Passed: WebApp successfully responded with HTTP status code 200." > /tmp/test_result.txt
+            else
+              echo "Test Failed: WebApp failed to respond with HTTP status code 200." > /tmp/test_result.txt
+              exit 1
+            fi
+      - store_test_results:
+          path: /tmp/test-result.txt
+      - slack/notify:
+          channel: '#circle-ci'
+          event: always
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "plain_text",
+                      "text": "*WebApp build test completed for commit $CIRCLE_SHA1*",
+                      "emoji": true
+                    },
+                    {
+                      "type": "plain_text",
+                      "text": "Test Result: $(cat /tmp/test_result.txt)",
+                      "emoji": true
+                    }
+                  ]
+                }
+              ]
+            }
+      - run:
+          name: Log in to GitLab Container Registry
+          command: |
+            echo $CI_REGISTRY_PASSWORD | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+      - run:
+          name: Tag Docker Image for GitLab Container Registry
+          command: |
+            docker tag devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM} $CI_REGISTRY/$CI_REGISTRY_USER/circleci/weather-webapp:${CIRCLE_BUILD_NUM}
+      - run:
+          name: Push Docker Image to GitLab Container Registry
+          command: |
+            docker push $CI_REGISTRY/$CI_REGISTRY_USER/circleci/weather-webapp:${CIRCLE_BUILD_NUM}
+
+workflows:
+  version: 2
+  build_and_notify:
+    jobs:
+      - build:
+          context: slack-secrets
