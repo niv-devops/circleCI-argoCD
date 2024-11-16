@@ -1,8 +1,11 @@
 version: 2.1
 orbs:
-  slack: circleci/slack@4.9.3
+  slack: circleci/slack@5.1.1
+  terraform: circleci/terraform@3.4.0
+  aws-cli: circleci/aws-cli@5.1.1
+  aws-eks: circleci/aws-eks@2.2.0
 jobs:
-  build:
+  build_test_publish:
     docker:
       - image: circleci/python:3.8
     steps:
@@ -10,13 +13,14 @@ jobs:
       - setup_remote_docker
       - run:
           name: Build Docker Image
-          command: docker build -t devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM} .
+          command: docker build -t devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM} ./src
       - run:
           name: Run Docker Image
           command: docker run --rm -d -p 5000:5000 --name goofy devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM}
       - run:
           name: Test Docker container
           command: |
+            sleep 10
             container_ip=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' goofy)
             echo "Container IP: $container_ip"
             if curl -f http://$container_ip:5000; then
@@ -52,20 +56,104 @@ jobs:
             }
       - run:
           name: Log in to GitLab Container Registry
-          command: |
-            echo $CI_REGISTRY_PASSWORD | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+          command: echo $CI_REGISTRY_PASSWORD | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
       - run:
           name: Tag Docker Image for GitLab Container Registry
-          command: |
-            docker tag devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM} $CI_REGISTRY/$CI_REGISTRY_USER/circleci/weather-webapp:${CIRCLE_BUILD_NUM}
+          command: docker tag devopsgoofy/weather-webapp:${CIRCLE_BUILD_NUM} $CI_REGISTRY/$CI_REGISTRY_USER/circleci/weather-webapp:${CIRCLE_BUILD_NUM}
       - run:
           name: Push Docker Image to GitLab Container Registry
+          command: docker push $CI_REGISTRY/$CI_REGISTRY_USER/circleci/weather-webapp:${CIRCLE_BUILD_NUM}
+
+  checkov:
+    docker:
+      - image: circleci/python:3.8
+    steps:
+      - checkout
+      - run:
+          name: Install Checkov
+          command: pip install checkov
+      - run:
+          name: Run Checkov on Terraform files
+          command: checkov -d /terraform --quiet
+
+  terratest:
+    docker:
+      - image: cimg/go:1.23.3
+    steps:
+      - checkout
+      - aws-cli/setup
+      - run:
+          name: Install OpenTofu
           command: |
-            docker push $CI_REGISTRY/$CI_REGISTRY_USER/circleci/weather-webapp:${CIRCLE_BUILD_NUM}
+            curl -Lo tofu.tar.gz https://github.com/opentofu/opentofu/releases/download/v1.8.5/tofu_1.8.5_linux_amd64.tar.gz
+            tar -xzf tofu.tar.gz
+            chmod +x tofu
+            sudo mv tofu /usr/local/bin/
+      - run:
+          name: Install dependencies
+          command: |
+            cd terraform/test
+            tofu init
+            go mod tidy
+      - run:
+          name: Run Terratest
+          command: |
+            cd terraform/test
+            tofu init
+            go test -v
+
+  eks_cluster:
+    docker:
+      - image: cimg/deploy:2024.11.1
+      - image: cimg/aws:2024.03.1
+    steps:
+      - checkout
+      - aws-cli/setup
+      - run:
+          name: Initialize Terraform
+          command: terraform init
+      - run:
+          name: Create EKS Cluster
+          command: terraform apply -auto-approve
+          
+  deploy_argocd:
+    docker:
+      - image: bitnami/argo-cd:2.13.0
+    steps:
+      - checkout
+      - aws-cli/setup
+      - run:
+          name: Login to ArgoCD
+          command: |
+            kubectl create namespace argocd
+            argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
+      - run:
+          name: Add repo to ArgoCD
+          command: argocd repo add $K8S_REPO_URL --username $CI_REGISTRY_USER --password $CI_REGISTRY_PASSWORD
+      - run:
+          name: Create app in ArgoCD
+          command: |
+            argocd app create weather-webapp --repo ${K8S_REPO_URL} --path manifests \
+              --dest-server https://kubernetes.default.svc --dest-namespace argocd
+      - run:
+          name: Sync the application for deployment
+          command: aargocd app sync weather-webapp
+      - run:
+          name: Auto-sync the application
+          command: argocd app set weather-webapp --sync-policy automated --sync-option
 
 workflows:
   version: 2
-  build_and_notify:
+  weather_webapp:
     jobs:
-      - build:
+      - build_test_publish:
           context: slack-secrets
+      - checkov
+      - terratest
+      - eks_cluster:
+          requires:
+            - checkov
+            - terratest
+      - deploy_to_argo:
+          requires:
+            - eks_cluster
