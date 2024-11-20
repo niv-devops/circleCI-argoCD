@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-webapp
+  labels:
+    app: weather-webapp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: weather-webapp
+  template:
+    metadata:
+      labels:
+        app: weather-webapp
+    spec:
+      containers:
+        - name: weather-webapp
+          image: registry.gitlab.com/realgoofy/circleci/weather-webapp:135
+          ports:
+            - containerPort: 5000
+      imagePullSecrets:
+        - name: regcred
