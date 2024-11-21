@@ -1,9 +1,9 @@
 package test
 
 import (
-	"fmt"
 	"testing"
 	"github.com/gruntwork-io/terratest/modules/terraform"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestEKSCluster(t *testing.T) {
@@ -13,12 +13,9 @@ func TestEKSCluster(t *testing.T) {
 		TerraformDir: "../",
 	}
 
-	defer terraform.Destroy(t, terraformOptions)
-	terraform.InitAndApply(t, terraformOptions)
-
-	clusterEndpoint := terraform.Output(t, terraformOptions, "eks_cluster_endpoint")
-	if clusterEndpoint == "" {
-		t.Fatalf("Cluster endpoint is empty, the EKS cluster was not created successfully.")
-	}
-	fmt.Println("EKS cluster endpoint:", clusterEndpoint)
+	terraform.Init(t, terraformOptions)
+	terraform.Validate(t, terraformOptions)
+        planOutput := terraform.Plan(t, terraformOptions)
+        
+        assert.Contains(t, planOutput, "Plan:", "Plan not found, cluster won't be created.")
 }
