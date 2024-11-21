@@ -196,6 +196,68 @@ jobs:
             kubectl get svc -n argocd
             kubectl get pods -o wide -n argocd
 
+  chaos_monkey:
+    machine:
+      image: ubuntu-2404:2024.08.1
+    steps:
+      - checkout
+      - aws-cli/setup
+      - aws-eks/setup
+      - kubernetes/install-kubectl
+      - run:
+          name: Create Kubeconfig
+          command: aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name eks-cluster
+      - run:
+          name: Install Halyard
+          command: |
+            curl -O https://raw.githubusercontent.com/spinnaker/halyard/master/install/debian/InstallHalyard.sh
+            sudo bash InstallHalyard.sh &
+      - run:
+          name: Configure Spinnaker and Halyard for Kubernetes accounts
+          command: |
+            sleep 60
+            hal config provider kubernetes enable
+            CONTEXT=$(kubectl config current-context)
+            kubectl create namespace spinnaker || echo "Namespace 'spinnaker' already exists"
+            kubectl apply --context $CONTEXT -f argocd/service-account.yml
+            echo "CONTEXT=$CONTEXT" >> $BASH_ENV
+      - run:
+          name: Extract spinnaker-service-account secret token
+          command: |
+            sleep 60
+            TOKEN=$(kubectl get secret --context $CONTEXT \
+            $(kubectl get serviceaccount spinnaker-service-account \
+              --context $CONTEXT -n spinnaker -o jsonpath='{.secrets[0].name}') \
+            -n spinnaker -o jsonpath='{.data.token}' | base64 --decode)
+            echo token one is $TOKEN
+            echo "TOKEN=$TOKEN" >> $BASH_ENV
+      - run:
+          name: Set the user entry in kubeconfig
+          command: |
+            echo token two is $TOKEN
+            kubectl config set-credentials ${CONTEXT}-token-user --token $TOKEN
+            kubectl config set-context $CONTEXT --user ${CONTEXT}-token-user
+      - run:
+          name: Install Chaos Monkey
+          command: go get github.com/netflix/chaosmonkey/cmd/chaosmonkey
+      - run:
+          name: Run Chaos Monkey
+          command: |
+            chaos-monkey --namespace argocd --kill-frequency=1 --duration=10m \
+              --selector="app=weather-webapp"
+      - run:
+          name: Validate System Resilience
+          command: |
+            kubectl rollout status deployment weather-webapp -n argocd
+            kubectl get pods -n argocd
+            kubectl get svc -n argocd
+            if kubectl get pods -n argocd | grep -q 'CrashLoopBackOff'; then
+              echo "Chaos Monkey introduced failures." > /tmp/chaos_result.txt
+              exit 1
+            else
+              echo "Cluster is stable after Chaos Monkey simulation." > /tmp/chaos_result.txt
+            fi
+
 workflows:
   version: 2
   weather_webapp:
@@ -212,3 +274,6 @@ workflows:
       - deploy_argocd:
           requires:
             - eks_cluster
+      - chaos_monkey:
+          requires:
+            - deploy_argocd
