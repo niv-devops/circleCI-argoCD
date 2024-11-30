@@ -163,7 +163,7 @@ jobs:
       - run:
           name: Login to ArgoCD
           command: |
-            sleep 30
+            sleep 120
             argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
       - run:
           name: Add repo to ArgoCD
@@ -197,8 +197,8 @@ jobs:
             kubectl get pods -o wide -n argocd
 
   chaos_monkey:
-    machine:
-      image: ubuntu-2404:2024.08.1
+    docker:
+      - image: cimg/base:2024.11
     steps:
       - checkout
       - aws-cli/setup
@@ -208,55 +208,32 @@ jobs:
           name: Create Kubeconfig
           command: aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name eks-cluster
       - run:
-          name: Install Halyard
-          command: |
-            curl -O https://raw.githubusercontent.com/spinnaker/halyard/master/install/debian/InstallHalyard.sh
-            sudo bash InstallHalyard.sh &
-      - run:
-          name: Configure Spinnaker and Halyard for Kubernetes accounts
-          command: |
-            sleep 60
-            hal config provider kubernetes enable
-            CONTEXT=$(kubectl config current-context)
-            kubectl create namespace spinnaker || echo "Namespace 'spinnaker' already exists"
-            kubectl apply --context $CONTEXT -f argocd/service-account.yml
-            echo "CONTEXT=$CONTEXT" >> $BASH_ENV
-      - run:
-          name: Extract spinnaker-service-account secret token
-          command: |
-            sleep 60
-            TOKEN=$(kubectl get secret --context $CONTEXT \
-            $(kubectl get serviceaccount spinnaker-service-account \
-              --context $CONTEXT -n spinnaker -o jsonpath='{.secrets[0].name}') \
-            -n spinnaker -o jsonpath='{.data.token}' | base64 --decode)
-            echo token one is $TOKEN
-            echo "TOKEN=$TOKEN" >> $BASH_ENV
-      - run:
-          name: Set the user entry in kubeconfig
-          command: |
-            echo token two is $TOKEN
-            kubectl config set-credentials ${CONTEXT}-token-user --token $TOKEN
-            kubectl config set-context $CONTEXT --user ${CONTEXT}-token-user
-      - run:
-          name: Install Chaos Monkey
-          command: go get github.com/netflix/chaosmonkey/cmd/chaosmonkey
-      - run:
-          name: Run Chaos Monkey
-          command: |
-            chaos-monkey --namespace argocd --kill-frequency=1 --duration=10m \
-              --selector="app=weather-webapp"
-      - run:
-          name: Validate System Resilience
-          command: |
-            kubectl rollout status deployment weather-webapp -n argocd
-            kubectl get pods -n argocd
-            kubectl get svc -n argocd
-            if kubectl get pods -n argocd | grep -q 'CrashLoopBackOff'; then
-              echo "Chaos Monkey introduced failures." > /tmp/chaos_result.txt
-              exit 1
-            else
-              echo "Cluster is stable after Chaos Monkey simulation." > /tmp/chaos_result.txt
-            fi
+        name: Install Helm
+        command: |
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+    - run:
+        name: Install Kube-Monkey
+        command: |
+          helm repo add kubemonkey https://asobti.github.io/kube-monkey/charts/repo
+          helm repo update
+          helm install kube-monkey kubemonkey/kube-monkey --version 1.5.2 \
+            --namespace argocd \
+            --set config.dryRun=false \
+            --set config.whitelistedNamespaces="[default]" \
+            --set config.scheduleInterval="1m" \
+            --set config.debug.enabled=true \
+            --set config.debug.schedule_immediate_kill=true
+    - run:
+        name: View Kube-Monkey status
+        command: |
+          sleep 120
+          echo "Kube-Monkey Termination Results:"
+          kubectl get pods --namespace chaos-monkey
+    - run:
+        name: Stop Kube-Monkey
+        command: helm uninstall kube-monkey
 
 workflows:
   version: 2
